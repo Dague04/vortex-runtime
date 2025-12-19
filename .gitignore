@@ -1,0 +1,18 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# RustRover
+.idea/
+*.iml
+
+# Cargo
+Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
