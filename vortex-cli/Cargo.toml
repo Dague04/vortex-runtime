@@ -8,3 +8,20 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Our crates
+vortex-core.workspace = true
+vortex-cgroup.workspace = true
+
+# CLI parsing
+clap.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+anyhow = "1.0"
+nix = "0.29.0"
