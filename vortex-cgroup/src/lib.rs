@@ -18,8 +18,8 @@ pub use controller::CGroupController;
 // Modules
 mod controller;
 mod limits;
+mod stats;
 //mod fs;
-//mod stats;
 
 /// CGroup v2 base path
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
