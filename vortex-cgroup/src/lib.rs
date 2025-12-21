@@ -1,14 +1,28 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! # CGroup v2 Management
+//!
+//! This crate provides safe, idiomatic Rust bindings for Linux CGroups v2.
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use vortex_cgroup::CGroupController;
+//! use vortex_core::{ContainerId, CpuLimit, CpuCores, MemoryLimit, MemorySize};
+//!
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// Deny unsafe code - we want memory safety!
+#![deny(unsafe_code)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// Re-export main types
+pub use controller::CGroupController;
+
+// Modules
+mod controller;
+mod limits;
+//mod fs;
+//mod stats;
+
+/// CGroup v2 base path
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// Vortex namespace within cgroup hierarchy
+pub const VORTEX_NAMESPACE: &str = "vortex";
