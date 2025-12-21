@@ -1,14 +1,36 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Linux namespace isolation
+//!
+//! This crate provides safe wrappers around Linux namespace APIs:
+//! - PID namespace (process isolation)
+//! - Mount namespace (filesystem isolation)
+//! - Network namespace (network isolation)
+//! - UTS namespace (hostname isolation)
+//! - IPC namespace (inter-process communication isolation)
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![deny(unsafe_code)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub use config::NamespaceConfig;
+pub use manager::NamespaceManager;
+
+mod config;
+//mod isolation;
+mod manager;
+
+/// Available namespace types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceType {
+    /// Process ID namespace
+    Pid,
+    /// Mount namespace (filesystem)
+    Mount,
+    /// Network namespace
+    Network,
+    /// UTS namespace (hostname)
+    Uts,
+    /// IPC namespace
+    Ipc,
+    /// User namespace
+    User,
+    /// CGroup namespace
+    Cgroup,
 }

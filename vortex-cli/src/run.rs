@@ -5,6 +5,7 @@ use tokio::signal;
 use tracing::{debug, info, warn};
 use vortex_cgroup::CGroupController;
 use vortex_core::{ContainerId, CpuCores, CpuLimit, MemoryLimit, MemorySize};
+use vortex_namespace::{NamespaceConfig, NamespaceManager};
 
 use crate::cli::RunArgs;
 
@@ -21,7 +22,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     info!("📦 Container ID: {}", container_id);
 
-    // Create CGroup
+    // === CGROUP FIRST (before namespaces!) ===
     info!("🔧 Creating cgroup...");
     let cgroup = CGroupController::new(container_id.clone())
         .await
@@ -73,11 +74,52 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     info!("✅ Process {} added to cgroup", pid);
 
+    // === NOW ENTER NAMESPACES (after async setup) ===
+    if args.isolate {
+        info!("🔒 Setting up namespace isolation...");
+
+        // Disable PID namespace for now (requires fork to work properly)
+        let mut ns_config = NamespaceConfig::new();
+        ns_config.enable_pid = false; // ← Disable problematic PID namespace
+
+        // Set hostname if provided
+        if let Some(hostname) = args.hostname.clone() {
+            ns_config = ns_config.with_hostname(hostname);
+        } else {
+            // Use container ID as hostname
+            ns_config = ns_config.with_hostname(container_id.as_str());
+        }
+
+        // Set rootfs if provided
+        if let Some(rootfs) = args.rootfs.clone() {
+            ns_config = ns_config.with_rootfs(rootfs);
+        }
+
+        let ns_manager = NamespaceManager::new(ns_config);
+
+        // Enter namespaces (no more async after this point is safest)
+        ns_manager
+            .enter_namespaces()
+            .context("Failed to enter namespaces")?;
+
+        info!("✅ Namespace isolation enabled");
+
+        // Show what we isolated
+        if let Ok(hostname) = hostname::get() {
+            info!("  Hostname: {}", hostname.to_string_lossy());
+        }
+    } else {
+        info!("⚠️  Namespace isolation disabled");
+    }
+
     // Display what command would run (for now)
     info!("🚀 Would execute: {}", args.command.join(" "));
 
-    if let Some(rootfs) = args.rootfs {
-        info!("📁 With rootfs: {}", rootfs.display());
+    if args.rootfs.is_some() {
+        info!(
+            "📁 With rootfs: {}",
+            args.rootfs.as_ref().unwrap().display()
+        );
     } else {
         info!("📁 Using host filesystem (no rootfs specified)");
     }
@@ -85,6 +127,24 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Show current stats
     info!("📊 Initial statistics:");
     display_stats(&cgroup).await?;
+
+    // Show isolation status
+    info!("");
+    info!("🔐 Isolation Summary:");
+    if args.isolate {
+        info!("  ✅ Namespaces: ENABLED");
+        info!("     • Mount isolation");
+        info!("     • UTS isolation (hostname)");
+        info!("     • IPC isolation");
+        info!("     ⚠️  PID isolation (disabled - requires fork)");
+    } else {
+        info!("  ⚠️  Namespaces: DISABLED");
+    }
+    if args.cpu.is_some() || args.memory.is_some() {
+        info!("  ✅ Resource limits: ENABLED");
+    } else {
+        info!("  ⚠️  Resource limits: NONE");
+    }
 
     // Wait for Ctrl+C
     info!("");

@@ -8,3 +8,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Our crates
+vortex-core.workspace = true
+
+# System interface
+nix.workspace = true
+libc.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow = "1.0"
+
+# Logging
+tracing.workspace = true
+config = "0.15.19"
+tracing-subscriber.workspace = true
+hostname = "0.4.2"

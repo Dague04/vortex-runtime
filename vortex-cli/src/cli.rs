@@ -43,6 +43,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub memory: Option<u64>,
 
+    /// Container hostname (requires namespace isolation)
+    #[arg(long)]
+    pub hostname: Option<String>,
+
+    /// Enable namespace isolation
+    #[arg(long, default_value = "true")]
+    pub isolate: bool,
+
     /// Path to container rootfs directory
     #[arg(long)]
     pub rootfs: Option<PathBuf>,
