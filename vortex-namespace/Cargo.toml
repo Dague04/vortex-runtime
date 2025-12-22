@@ -24,3 +24,4 @@ tracing.workspace = true
 config = "0.15.19"
 tracing-subscriber.workspace = true
 hostname = "0.4.2"
+ctrlc = "3.5.1"

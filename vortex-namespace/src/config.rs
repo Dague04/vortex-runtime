@@ -30,7 +30,7 @@ pub struct NamespaceConfig {
 impl Default for NamespaceConfig {
     fn default() -> Self {
         Self {
-            enable_pid: false,
+            enable_pid: true,
             enable_mount: true,
             enable_network: false, // Network isolation is complex
             enable_uts: true,

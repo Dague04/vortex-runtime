@@ -7,13 +7,13 @@
 //! - UTS namespace (hostname isolation)
 //! - IPC namespace (inter-process communication isolation)
 
-#![deny(unsafe_code)]
-
+#![allow(unsafe_code)]
 pub use config::NamespaceConfig;
 pub use manager::NamespaceManager;
 
 mod config;
 //mod isolation;
+mod executor;
 mod manager;
 
 /// Available namespace types

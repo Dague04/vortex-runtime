@@ -67,6 +67,9 @@ impl CGroupController {
 
     /// Create the cgroup directory structure
     async fn create(&mut self) -> Result<()> {
+        // Ensure root controllers are enabled first
+        Self::ensure_root_controllers().await?;
+
         // Step 1: Ensure parent directory exists
         let parent = self
             .path
@@ -113,34 +116,85 @@ impl CGroupController {
     async fn enable_controllers(&self, parent: &std::path::Path) -> Result<()> {
         let control_file = parent.join("cgroup.subtree_control");
 
-        // Read current state
-        let current = match fs::read_to_string(&control_file).await {
-            Ok(content) => content,
-            Err(_) => return Ok(()), // Can't read? Skip enabling
-        };
+        debug!("Checking controllers at: {}", control_file.display());
 
-        // Check if all needed controllers are present
-        let needed = ["cpu", "memory", "io"];
-        let all_enabled = needed.iter().all(|c| current.contains(c));
-
-        if all_enabled {
-            debug!("All required controllers already enabled");
+        // Check if file exists
+        if !control_file.exists() {
+            debug!("Control file does not exist, skipping controller setup");
             return Ok(());
         }
 
-        // Try to enable missing controllers (but don't fail)
-        let missing: Vec<String> = needed
+        // Try to read what's currently enabled
+        let current = match fs::read_to_string(&control_file).await {
+            Ok(content) => {
+                debug!("Current controllers: {}", content.trim());
+                content
+            }
+            Err(e) => {
+                debug!("Could not read control file: {}", e);
+                String::new() // ← Changed! Assume empty instead of returning
+            }
+        };
+
+        // Define what we need
+        let needed = ["cpu", "memory", "io"];
+
+        // Check what's missing
+        let missing: Vec<&str> = needed
             .iter()
-            .filter(|c| !current.contains(*c))
-            .map(|c| format!("+{}", c))
+            .filter(|&&controller| !current.contains(controller))
+            .copied()
             .collect();
 
-        if !missing.is_empty() {
-            debug!("Attempting to enable: {}", missing.join(" "));
-            let _ = fs::write(&control_file, missing.join(" ")).await;
+        // If nothing is missing, we're done
+        if missing.is_empty() {
+            debug!(
+                "All required controllers already enabled in {}",
+                parent.display()
+            );
+            return Ok(());
         }
 
-        Ok(())
+        // Try to enable missing controllers
+        let to_enable: String = missing
+            .iter()
+            .map(|c| format!("+{}", c))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        debug!(
+            "Enabling controllers in {}: {}",
+            parent.display(),
+            to_enable
+        );
+
+        // Write to enable controllers
+        match fs::write(&control_file, &to_enable).await {
+            Ok(_) => {
+                debug!("Successfully enabled controllers in {}", parent.display());
+                Ok(())
+            }
+            Err(e) => {
+                // Log but don't fail - they might be enabled at a higher level
+                debug!(
+                    "Could not enable controllers in {}: {}",
+                    parent.display(),
+                    e
+                );
+
+                // If the error is permission denied, that's usually OK
+                // (controllers managed at higher level)
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    debug!("Permission denied is OK - controllers may be managed at higher level");
+                    Ok(())
+                } else {
+                    // For other errors, return the error
+                    Err(Error::PermissionDenied {
+                        operation: format!("Enable controllers in {}: {}", parent.display(), e),
+                    })
+                }
+            }
+        }
     }
 
     pub async fn add_process(&self, pid: ProcessId) -> Result<()> {
@@ -168,6 +222,55 @@ impl CGroupController {
         // ... async cleanup ...
         self.active = false; // Mark as cleaned up
         Ok(())
+    }
+
+    /// Ensure controllers are enabled at root cgroup level
+    async fn ensure_root_controllers() -> Result<()> {
+        let root_control = std::path::Path::new("/sys/fs/cgroup/cgroup.subtree_control");
+
+        debug!("Checking root cgroup controllers");
+
+        // Read what's enabled at root
+        let current = match fs::read_to_string(root_control).await {
+            Ok(content) => content,
+            Err(e) => {
+                debug!("Could not read root cgroup controllers: {}", e);
+                return Ok(()); // Root might be managed by system
+            }
+        };
+
+        // Check if our needed controllers are enabled
+        let needed = ["cpu", "memory", "io"];
+        let missing: Vec<&str> = needed
+            .iter()
+            .filter(|&&c| !current.contains(c))
+            .copied()
+            .collect();
+
+        if missing.is_empty() {
+            debug!("All controllers already enabled at root");
+            return Ok(());
+        }
+
+        // Try to enable missing controllers
+        let to_enable: String = missing
+            .iter()
+            .map(|c| format!("+{}", c))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        debug!("Attempting to enable at root: {}", to_enable);
+
+        match fs::write(root_control, &to_enable).await {
+            Ok(_) => {
+                debug!("Successfully enabled controllers at root");
+                Ok(())
+            }
+            Err(e) => {
+                debug!("Could not enable root controllers (may be OK): {}", e);
+                Ok(()) // Don't fail - system may manage this
+            }
+        }
     }
 }
 

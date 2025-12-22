@@ -29,6 +29,7 @@ pub enum Commands {
 }
 
 /// Arguments for the 'run' command
+/// Arguments for the 'run' command
 #[derive(Parser, Debug)]
 pub struct RunArgs {
     /// Container ID (must be unique)
@@ -50,6 +51,10 @@ pub struct RunArgs {
     /// Enable namespace isolation
     #[arg(long, default_value = "true")]
     pub isolate: bool,
+
+    /// Enable full PID isolation with fork/exec
+    #[arg(long, default_value = "false")]
+    pub pid_isolate: bool, // ← New flag
 
     /// Path to container rootfs directory
     #[arg(long)]

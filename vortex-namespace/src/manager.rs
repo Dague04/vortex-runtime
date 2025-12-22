@@ -6,6 +6,7 @@ use tracing::{debug, info};
 use vortex_core::{Error, Result};
 
 use crate::config::NamespaceConfig;
+use crate::executor;
 
 /// Manages Linux namespaces for container isolation
 pub struct NamespaceManager {
@@ -90,6 +91,25 @@ impl NamespaceManager {
     /// Get current namespace configuration
     pub fn config(&self) -> &NamespaceConfig {
         &self.config
+    }
+
+    /// Execute a command in isolated namespaces
+    ///
+    /// This method:
+    /// 1. Enters namespaces (including PID)
+    /// 2. Forks the process
+    /// 3. Child becomes PID 1 in new namespace
+    /// 4. Execs the command
+    /// 5. Parent waits for child
+    ///
+    /// Returns the exit code of the command.
+    pub fn execute_command(&self, command: &[String]) -> Result<i32> {
+        // First, enter all namespaces
+        self.enter_namespaces()?;
+
+        // Now fork and exec
+        // The child will be PID 1 in the new PID namespace
+        executor::execute_in_namespace(command)
     }
 }
 

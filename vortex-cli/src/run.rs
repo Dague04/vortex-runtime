@@ -1,7 +1,6 @@
 //! Container execution logic
 
 use anyhow::{Context, Result};
-use tokio::signal;
 use tracing::{debug, info, warn};
 use vortex_cgroup::CGroupController;
 use vortex_core::{ContainerId, CpuCores, CpuLimit, MemoryLimit, MemorySize};
@@ -18,11 +17,11 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Parse and validate container ID
-    let container_id = ContainerId::new(args.id).context("Invalid container ID")?;
+    let container_id = ContainerId::new(&args.id).context("Invalid container ID")?;
 
     info!("📦 Container ID: {}", container_id);
 
-    // === CGROUP FIRST (before namespaces!) ===
+    // === CGROUP SETUP (must happen before fork) ===
     info!("🔧 Creating cgroup...");
     let cgroup = CGroupController::new(container_id.clone())
         .await
@@ -74,98 +73,120 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     info!("✅ Process {} added to cgroup", pid);
 
-    // === NOW ENTER NAMESPACES (after async setup) ===
-    if args.isolate {
-        info!("🔒 Setting up namespace isolation...");
-
-        // Disable PID namespace for now (requires fork to work properly)
-        let mut ns_config = NamespaceConfig::new();
-        ns_config.enable_pid = false; // ← Disable problematic PID namespace
-
-        // Set hostname if provided
-        if let Some(hostname) = args.hostname.clone() {
-            ns_config = ns_config.with_hostname(hostname);
-        } else {
-            // Use container ID as hostname
-            ns_config = ns_config.with_hostname(container_id.as_str());
-        }
-
-        // Set rootfs if provided
-        if let Some(rootfs) = args.rootfs.clone() {
-            ns_config = ns_config.with_rootfs(rootfs);
-        }
-
-        let ns_manager = NamespaceManager::new(ns_config);
-
-        // Enter namespaces (no more async after this point is safest)
-        ns_manager
-            .enter_namespaces()
-            .context("Failed to enter namespaces")?;
-
-        info!("✅ Namespace isolation enabled");
-
-        // Show what we isolated
-        if let Ok(hostname) = hostname::get() {
-            info!("  Hostname: {}", hostname.to_string_lossy());
-        }
-    } else {
-        info!("⚠️  Namespace isolation disabled");
-    }
-
-    // Display what command would run (for now)
-    info!("🚀 Would execute: {}", args.command.join(" "));
-
-    if args.rootfs.is_some() {
-        info!(
-            "📁 With rootfs: {}",
-            args.rootfs.as_ref().unwrap().display()
-        );
-    } else {
-        info!("📁 Using host filesystem (no rootfs specified)");
-    }
-
-    // Show current stats
+    // Show initial stats
     info!("📊 Initial statistics:");
     display_stats(&cgroup).await?;
 
-    // Show isolation status
-    info!("");
-    info!("🔐 Isolation Summary:");
-    if args.isolate {
-        info!("  ✅ Namespaces: ENABLED");
-        info!("     • Mount isolation");
-        info!("     • UTS isolation (hostname)");
-        info!("     • IPC isolation");
-        info!("     ⚠️  PID isolation (disabled - requires fork)");
+    // === NAMESPACE ISOLATION + COMMAND EXECUTION ===
+    let exit_code = if args.isolate && args.pid_isolate {
+        // Full isolation with fork/exec
+        execute_with_full_isolation(&args, &container_id)?
+    } else if args.isolate {
+        // Partial isolation without PID namespace
+        execute_with_partial_isolation(&args, &container_id).await?
     } else {
-        info!("  ⚠️  Namespaces: DISABLED");
-    }
-    if args.cpu.is_some() || args.memory.is_some() {
-        info!("  ✅ Resource limits: ENABLED");
-    } else {
-        info!("  ⚠️  Resource limits: NONE");
-    }
-
-    // Wait for Ctrl+C
-    info!("");
-    info!("⏸️  Container running. Press Ctrl+C to stop...");
-
-    signal::ctrl_c()
-        .await
-        .context("Failed to listen for Ctrl+C")?;
-
-    // Cleanup
-    info!("");
-    info!("🛑 Stopping container...");
+        // No isolation (just for testing)
+        info!("⚠️  Running without namespace isolation");
+        info!("🚀 Would execute: {}", args.command.join(" "));
+        wait_for_ctrl_c().await?;
+        0
+    };
 
     // Show final stats
     info!("📊 Final statistics:");
     display_stats(&cgroup).await?;
 
+    // Cleanup
     info!("🧹 Cleaning up cgroup...");
     cgroup.cleanup().await.context("Failed to cleanup cgroup")?;
 
-    info!("✅ Container stopped successfully");
+    if exit_code == 0 {
+        info!("✅ Container stopped successfully");
+    } else {
+        warn!("⚠️  Container exited with code: {}", exit_code);
+    }
+
+    Ok(())
+}
+
+/// Execute with full PID isolation (fork/exec)
+/// Execute with full PID isolation (fork/exec)
+fn execute_with_full_isolation(args: &RunArgs, container_id: &ContainerId) -> Result<i32> {
+    info!("🔒 Setting up FULL namespace isolation (with PID)...");
+
+    let mut ns_config = NamespaceConfig::new();
+    ns_config.enable_pid = true; // Enable PID namespace
+
+    // Set hostname
+    if let Some(ref hostname) = args.hostname {
+        ns_config = ns_config.with_hostname(hostname);
+    } else {
+        ns_config = ns_config.with_hostname(container_id.as_str());
+    }
+
+    // Set rootfs if provided
+    if let Some(ref rootfs) = args.rootfs {
+        ns_config = ns_config.with_rootfs(rootfs.clone());
+    }
+
+    let ns_manager = NamespaceManager::new(ns_config);
+
+    info!("🚀 Executing command in isolated namespace...");
+    info!("   Command: {}", args.command.join(" "));
+
+    // Execute command - this will fork and wait
+    let exit_code = ns_manager.execute_command(&args.command)?;
+
+    info!("✅ Command completed with exit code: {}", exit_code);
+
+    Ok(exit_code)
+}
+
+/// Execute with partial isolation (no PID namespace)
+async fn execute_with_partial_isolation(args: &RunArgs, container_id: &ContainerId) -> Result<i32> {
+    info!("🔒 Setting up namespace isolation (without PID)...");
+
+    let mut ns_config = NamespaceConfig::new();
+    ns_config.enable_pid = false; // ← No PID namespace
+
+    // Set hostname
+    if let Some(ref hostname) = args.hostname {
+        ns_config = ns_config.with_hostname(hostname);
+    } else {
+        ns_config = ns_config.with_hostname(container_id.as_str());
+    }
+
+    let ns_manager = NamespaceManager::new(ns_config);
+
+    // Enter namespaces
+    ns_manager
+        .enter_namespaces()
+        .context("Failed to enter namespaces")?;
+
+    info!("✅ Namespace isolation enabled");
+
+    if let Ok(hostname) = hostname::get() {
+        info!("   Hostname: {}", hostname.to_string_lossy());
+    }
+
+    info!("🚀 Would execute: {}", args.command.join(" "));
+
+    // Wait for Ctrl+C
+    wait_for_ctrl_c().await?;
+
+    Ok(0)
+}
+
+async fn wait_for_ctrl_c() -> Result<()> {
+    info!("");
+    info!("⏸️  Container running. Press Ctrl+C to stop...");
+
+    tokio::signal::ctrl_c()
+        .await
+        .context("Failed to listen for Ctrl+C")?;
+
+    info!("");
+    info!("🛑 Stopping container...");
 
     Ok(())
 }
