@@ -1,19 +1,16 @@
-//! Error types for Vortex operations.
-//!
-//! This module uses `thiserror` for ergonomic error definitions.
+//! Error types for Vortex
 
-use std::io;
-use std::path::PathBuf;
 use thiserror::Error;
 
-/// The main error type for vortex operations.
-#[derive(Debug, Error)]
+/// Vortex error types
+#[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
-    /// I/O error occurred
+    /// I/O error
     #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
 
-    /// CGroup operation failed
+    /// `CGroup` operation failed
     #[error("CGroup error: {message}")]
     CGroup {
         /// Error message
@@ -35,39 +32,30 @@ pub enum Error {
     },
 
     /// Invalid configuration
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-
-    /// Resource limit error
-    #[error("Invalid resource limit: {resource} = {value}")]
-    InvalidLimit {
-        /// Resource type
-        resource: String,
-        /// Invalid value
-        value: String,
+    #[error("Invalid configuration: {message}")]
+    InvalidConfig {
+        /// Error message
+        message: String,
     },
 
-    /// Path does not exist
-    #[error("Path does not exist: {0}")]
-    PathNotFound(PathBuf),
+    /// System error from nix
+    #[error("System error: {0}")]
+    System(#[from] nix::Error),
 
-    /// Container already exists
-    #[error("Container already exists: {0}")]
-    ContainerExists(String),
+    /// Channel send error
+    #[error("Channel send error")]
+    ChannelSend,
 
-    /// Container not found
-    #[error("Container not found: {0}")]
-    ContainerNotFound(String),
-
-    /// System call failed
-    #[error("System call '{syscall}' failed: {errno}")]
-    Syscall {
-        /// Syscall name
-        syscall: String,
-        /// Error number
-        errno: i32,
-    },
+    /// Task join error
+    #[error("Task join error: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
 }
 
-/// Result type alias using our Error type
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
+    fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        Self::ChannelSend
+    }
+}
+
+/// Result type alias for Vortex operations
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,36 +1,20 @@
-//! Linux namespace isolation
+//! Namespace management for process isolation
 //!
-//! This crate provides safe wrappers around Linux namespace APIs:
-//! - PID namespace (process isolation)
-//! - Mount namespace (filesystem isolation)
-//! - Network namespace (network isolation)
-//! - UTS namespace (hostname isolation)
-//! - IPC namespace (inter-process communication isolation)
+//! This crate provides Linux namespace isolation for containers:
+//! - PID namespace - Process isolation
+//! - Network namespace - Network isolation
+//! - Mount namespace - Filesystem isolation
+//! - UTS namespace - Hostname isolation
+//! - IPC namespace - Inter-process communication isolation
+//! - User namespace - UID/GID mapping
 
-#![allow(unsafe_code)]
-pub use config::NamespaceConfig;
+#![warn(missing_docs, clippy::all, clippy::pedantic, clippy::nursery)]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+
+pub mod config;
+pub mod executor;
+pub mod manager;
+
+pub use config::{NamespaceConfig, NamespaceFlags};
+pub use executor::NamespaceExecutor;
 pub use manager::NamespaceManager;
-
-mod config;
-//mod isolation;
-mod executor;
-mod manager;
-
-/// Available namespace types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespaceType {
-    /// Process ID namespace
-    Pid,
-    /// Mount namespace (filesystem)
-    Mount,
-    /// Network namespace
-    Network,
-    /// UTS namespace (hostname)
-    Uts,
-    /// IPC namespace
-    Ipc,
-    /// User namespace
-    User,
-    /// CGroup namespace
-    Cgroup,
-}

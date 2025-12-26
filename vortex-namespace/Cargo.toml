@@ -8,20 +8,26 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Our crates
+# Internal
 vortex-core.workspace = true
-
-# System interface
-nix.workspace = true
-libc.workspace = true
 
 # Error handling
 thiserror.workspace = true
-anyhow = "1.0"
+anyhow.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# System
+nix.workspace = true
+libc.workspace = true
 
 # Logging
 tracing.workspace = true
-config = "0.15.19"
+
+# Serialization
+serde.workspace = true
+
+[dev-dependencies]
 tracing-subscriber.workspace = true
-hostname = "0.4.2"
-ctrlc = "3.5.1"

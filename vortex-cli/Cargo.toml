@@ -5,25 +5,34 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-repository.workspace = true
+
+[[bin]]
+name = "vortex"
+path = "src/main.rs"
 
 [dependencies]
-# Our crates
+# Internal
 vortex-core.workspace = true
 vortex-cgroup.workspace = true
 vortex-namespace.workspace = true
 
-# CLI parsing
-clap.workspace = true
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
 
-# Async runtime
+# Async
 tokio.workspace = true
+
+# CLI
+clap.workspace = true
 
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Error handling
-anyhow = "1.0"
+# System
 nix.workspace = true
-hostname = "0.4.2"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true

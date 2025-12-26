@@ -1,238 +1,137 @@
-//! Process execution in isolated namespaces
-//!
-//! This module uses `unsafe` for fork() which is inherently unsafe
-//! but necessary for proper PID namespace isolation.
+//! Namespace executor for running code in isolated namespaces
 
-#![allow(unsafe_code)]
+use std::process::Command;
+use vortex_core::{Error, ProcessId, Result};
 
-use nix::mount::{mount, umount, MsFlags};
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{fork, ForkResult, Pid};
-use std::ffi::CString;
-use tracing::{debug, error, info, warn};
-use vortex_core::{Error, Result};
+use crate::config::NamespaceConfig;
+use crate::manager::NamespaceManager;
 
-/// Execute a command in an isolated namespace
-///
-/// This function:
-/// 1. Forks the process
-/// 2. Child becomes PID 1 in new namespace
-/// 3. Child execs the command
-/// 4. Parent waits for child
-pub fn execute_in_namespace(command: &[String]) -> Result<i32> {
-    if command.is_empty() {
-        return Err(Error::InvalidConfig("Command cannot be empty".to_string()));
-    }
-
-    info!("🚀 Executing command: {}", command.join(" "));
-
-    // Fork the process
-    debug!("Forking process...");
-
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => {
-            // Parent process
-            info!("👨‍👦 Parent process waiting for child (PID {})", child);
-            parent_process(child)
-        }
-        Ok(ForkResult::Child) => {
-            // Child process - we're now PID 1 in the namespace!
-            // If exec fails, we exit here - never return to Rust runtime
-            child_process(command);
-
-            // Should never reach here
-            unreachable!("Child process should have exec'd or exited");
-        }
-        Err(e) => Err(Error::Namespace {
-            message: format!("Fork failed: {}", e),
-        }),
-    }
+/// Executor for running commands in isolated namespaces
+#[derive(Debug)]
+pub struct NamespaceExecutor {
+    manager: NamespaceManager,
 }
 
-/// Parent process: wait for child and handle signals
-fn parent_process(child_pid: Pid) -> Result<i32> {
-    debug!("Parent: Setting up signal handler...");
-
-    // Setup signal handler for Ctrl+C
-    // Make handler more robust - don't fail if it errors
-    let child_pid_for_handler = child_pid;
-    if let Err(e) = ctrlc::set_handler(move || {
-        warn!("Parent: Received Ctrl+C, forwarding to child...");
-        let _ = kill(child_pid_for_handler, Signal::SIGTERM);
-    }) {
-        warn!("Could not set signal handler: {}", e);
-        // Continue anyway - not fatal
-    }
-
-    debug!("Parent: Waiting for child to exit...");
-
-    // Wait for child to exit
-    loop {
-        match waitpid(child_pid, None) {
-            Ok(WaitStatus::Exited(_, exit_code)) => {
-                info!("👋 Child exited with code: {}", exit_code);
-                return Ok(exit_code);
-            }
-            Ok(WaitStatus::Signaled(_, signal, _)) => {
-                warn!("Child terminated by signal: {:?}", signal);
-                // Exit codes for signals: 128 + signal number
-                return Ok(128 + signal as i32);
-            }
-            Ok(WaitStatus::Stopped(_, signal)) => {
-                debug!("Child stopped by signal: {:?}", signal);
-                // Continue waiting
-            }
-            Ok(status) => {
-                debug!("Child status: {:?}", status);
-                // Continue waiting for exit
-            }
-            Err(nix::errno::Errno::EINTR) => {
-                // Interrupted by signal, continue waiting
-                debug!("Wait interrupted by signal, continuing...");
-                continue;
-            }
-            Err(nix::errno::Errno::ECHILD) => {
-                warn!("Child process no longer exists");
-                return Ok(0);
-            }
-            Err(e) => {
-                error!("Wait failed: {}", e);
-                return Err(Error::Namespace {
-                    message: format!("Wait failed: {}", e),
-                });
-            }
-        }
-    }
-}
-
-/// Set up the container environment
-/// This must be called AFTER entering namespaces but BEFORE exec
-fn setup_container_environment() -> Result<()> {
-    info!("🔧 Setting up container environment...");
-
-    // 1. Remount /proc to reflect new PID namespace
-    debug!("   Mounting new /proc");
-
-    // Try to unmount existing /proc
-    // Use MS_DETACH to make it safer (lazy unmount)
-    match umount("/proc") {
-        Ok(_) => debug!("   Unmounted old /proc"),
-        Err(e) => debug!("   Could not unmount /proc (continuing anyway): {}", e),
-    }
-
-    // Mount new proc filesystem
-    // MS_NOSUID | MS_NODEV | MS_NOEXEC for security
-    let flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
-
-    match mount(Some("proc"), "/proc", Some("proc"), flags, None::<&str>) {
-        Ok(_) => {
-            debug!("   ✅ New /proc mounted");
-        }
-        Err(e) => {
-            warn!("   Failed to mount /proc: {}", e);
-            // Don't fail - /proc might already be OK
+impl NamespaceExecutor {
+    /// Create a new namespace executor
+    #[must_use]
+    pub fn new(config: NamespaceConfig) -> Self {
+        Self {
+            manager: NamespaceManager::new(config),
         }
     }
 
-    // 2. Change to root directory
-    debug!("   Changing to /");
-    std::env::set_current_dir("/").map_err(|e| Error::Namespace {
-        message: format!("Failed to change directory: {}", e),
-    })?;
-
-    // 3. Set environment variables
-    debug!("   Setting environment variables");
-
-    unsafe {
-        std::env::set_var("HOME", "/root");
-        std::env::set_var("PWD", "/");
-        std::env::set_var("OLDPWD", "/");
+    /// Create with default configuration
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(NamespaceConfig::default())
     }
 
-    debug!("   ✅ Container environment ready");
-
-    Ok(())
-}
-
-/// Child process: setup and exec command
-fn child_process(command: &[String]) -> ! {
-    info!("👶 Child process started (we are PID 1 in namespace!)");
-    info!("   My PID: {}", std::process::id());
-
-    // Setup container environment (mount /proc, etc.)
-    if let Err(e) = setup_container_environment() {
-        eprintln!("❌ Failed to setup container environment: {}", e);
-        std::process::exit(126);
+    /// Get the namespace manager
+    #[must_use]
+    pub fn manager(&self) -> &NamespaceManager {
+        &self.manager
     }
 
-    // Build the actual command to execute
-    let (program, args) = build_command(command);
+    /// Execute a command in isolated namespaces
+    ///
+    /// # Errors
+    /// Returns error if namespace creation or command execution fails
+    pub fn execute(&mut self, program: &str, args: &[String]) -> Result<ExecutionResult> {
+        tracing::info!(
+            program = %program,
+            args = ?args,
+            "Executing in isolated namespace"
+        );
 
-    info!("   Executing: {} {:?}", program, args);
-    // This function never returns - it either execs or exits
+        // Create namespaces
+        self.manager.create()?;
 
-    info!("👶 Child process started (we are PID 1 in namespace!)");
-    info!("   My PID: {}", std::process::id());
+        // Get current PID (will be PID 1 in new PID namespace)
+        let pid = ProcessId::current();
 
-    // Build the actual command to execute
-    let (program, args) = build_command(command);
+        tracing::debug!(pid = pid.as_raw(), "Namespaces created, executing command");
 
-    info!("   Executing: {} {:?}", program, args);
+        // Execute the command
+        let mut cmd = Command::new(program);
+        cmd.args(args);
 
-    // Convert to CStrings for exec
-    let program_cstring = match CString::new(program.as_bytes()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("❌ Invalid program name: {}", e);
-            std::process::exit(127);
-        }
-    };
+        let output = cmd.output().map_err(|e| {
+            tracing::error!(
+                program = %program,
+                error = %e,
+                "Failed to execute command"
+            );
+            Error::Namespace {
+                message: format!("Failed to execute {program}: {e}"),
+            }
+        })?;
 
-    // Build args as CStrings (include program name as args[0])
-    let mut all_args = vec![program.clone()];
-    all_args.extend(args);
+        let exit_code = output.status.code().unwrap_or(-1);
 
-    let args_cstrings: Vec<CString> = match all_args
-        .iter()
-        .map(|arg| CString::new(arg.as_bytes()))
-        .collect()
+        tracing::info!(
+            program = %program,
+            exit_code,
+            "Command execution completed"
+        );
+
+        Ok(ExecutionResult {
+            pid,
+            exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    /// Execute a closure in isolated namespaces
+    ///
+    /// # Errors
+    /// Returns error if namespace creation fails
+    pub fn execute_fn<F, T>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
     {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("❌ Invalid argument: {}", e);
-            std::process::exit(127);
-        }
-    };
+        tracing::debug!("Executing function in isolated namespace");
 
-    debug!("Child: Calling execvp...");
+        // Create namespaces
+        self.manager.create()?;
 
-    // Exec replaces this process with the command
-    // This never returns on success
-    let result = nix::unistd::execvp(&program_cstring, &args_cstrings);
-
-    // If we get here, exec failed
-    eprintln!("❌ Failed to execute {}: {:?}", program, result);
-    std::process::exit(127);
+        // Execute the function
+        f()
+    }
 }
 
-/// Build the command with proper arguments
-///
-/// If command is a shell (/bin/bash, /bin/sh), add -i flag for interactive mode
-fn build_command(command: &[String]) -> (String, Vec<String>) {
-    if command.is_empty() {
-        return ("/bin/sh".to_string(), vec!["-i".to_string()]);
+/// Result of command execution
+#[derive(Debug)]
+pub struct ExecutionResult {
+    /// Process ID
+    pub pid: ProcessId,
+    /// Exit code
+    pub exit_code: i32,
+    /// Standard output
+    pub stdout: Vec<u8>,
+    /// Standard error
+    pub stderr: Vec<u8>,
+}
+
+impl ExecutionResult {
+    /// Check if execution was successful
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
     }
 
-    let program = command[0].clone();
-    let mut args = command[1..].to_vec();
-
-    // If it's a shell and no args, make it interactive
-    if (program == "/bin/bash" || program == "/bin/sh") && args.is_empty() {
-        args.push("-i".to_string());
+    /// Get stdout as string
+    #[must_use]
+    pub fn stdout_string(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
     }
 
-    (program, args)
+    /// Get stderr as string
+    #[must_use]
+    pub fn stderr_string(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
 }
 
 #[cfg(test)]
@@ -240,30 +139,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_command_bash() {
-        let cmd = vec!["/bin/bash".to_string()];
-        let (prog, args) = build_command(&cmd);
-        assert_eq!(prog, "/bin/bash");
-        assert_eq!(args, vec!["-i"]);
+    fn test_executor_creation() {
+        let config = NamespaceConfig::minimal();
+        let executor = NamespaceExecutor::new(config);
+
+        assert!(!executor.manager().is_created());
     }
 
     #[test]
-    fn test_build_command_with_args() {
-        let cmd = vec![
-            "/bin/bash".to_string(),
-            "-c".to_string(),
-            "echo hi".to_string(),
-        ];
-        let (prog, args) = build_command(&cmd);
-        assert_eq!(prog, "/bin/bash");
-        assert_eq!(args, vec!["-c", "echo hi"]);
-    }
+    fn test_execution_result() {
+        let result = ExecutionResult {
+            pid: ProcessId::from_raw(123),
+            exit_code: 0,
+            stdout: b"Hello".to_vec(),
+            stderr: Vec::new(),
+        };
 
-    #[test]
-    fn test_build_command_other() {
-        let cmd = vec!["echo".to_string(), "hello".to_string()];
-        let (prog, args) = build_command(&cmd);
-        assert_eq!(prog, "echo");
-        assert_eq!(args, vec!["hello"]);
+        assert!(result.success());
+        assert_eq!(result.stdout_string(), "Hello");
     }
 }

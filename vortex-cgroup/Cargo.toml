@@ -5,21 +5,28 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
+# Internal
 vortex-core.workspace = true
+
+# Error handling
 thiserror.workspace = true
-nix.workspace = true
+anyhow.workspace = true
 
-anyhow = "1.0"
-
-# Async I/O (for future)
-tokio = { workspace = true, features = ["fs", "io-util"] }
+# Async
+tokio.workspace = true
+async-trait.workspace = true
 
 # Logging
 tracing.workspace = true
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+
+# Serialization
+serde.workspace = true
+
+# System
+nix.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

@@ -1,17 +1,13 @@
-//! Command-line interface definitions using Clap
+//! CLI argument definitions
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
-/// Vortex Container Runtime - Lightweight Linux containers in Rust
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "vortex")]
-#[command(author = "Your Name")]
+#[command(about = "Vortex container runtime", long_about = None)]
 #[command(version)]
-#[command(about = "A lightweight container runtime written in Rust", long_about = None)]
-#[command(propagate_version = true)]
 pub struct Cli {
-    /// Enable verbose logging (debug level)
+    /// Enable verbose logging
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
@@ -19,48 +15,60 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 pub enum Commands {
-    /// Run a container with specified resource limits
-    Run(RunArgs),
+    /// Run a container
+    Run {
+        /// Container ID
+        #[arg(short, long)]
+        id: String,
 
-    /// Show version information
-    Version,
-}
+        /// CPU limit in cores (e.g., 1.0, 0.5)
+        #[arg(long, default_value = "1.0")]
+        cpu: f64,
 
-/// Arguments for the 'run' command
-/// Arguments for the 'run' command
-#[derive(Parser, Debug)]
-pub struct RunArgs {
-    /// Container ID (must be unique)
-    #[arg(short, long, default_value = "vortex-default")]
-    pub id: String,
+        /// Memory limit in MB
+        #[arg(long, default_value = "512")]
+        memory: u64,
 
-    /// CPU limit in cores (e.g., 0.5, 1.0, 2.0)
-    #[arg(long)]
-    pub cpu: Option<f64>,
+        /// Enable monitoring
+        #[arg(long)]
+        monitor: bool,
 
-    /// Memory limit in megabytes (e.g., 128, 512, 1024)
-    #[arg(long)]
-    pub memory: Option<u64>,
+        /// Disable namespaces
+        #[arg(long)]
+        no_namespaces: bool,
 
-    /// Container hostname (requires namespace isolation)
-    #[arg(long)]
-    pub hostname: Option<String>,
+        /// Custom hostname
+        #[arg(long)]
+        hostname: Option<String>,
 
-    /// Enable namespace isolation
-    #[arg(long, default_value = "true")]
-    pub isolate: bool,
+        /// Command to run
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 
-    /// Enable full PID isolation with fork/exec
-    #[arg(long, default_value = "false")]
-    pub pid_isolate: bool, // ← New flag
+    /// Get container stats
+    Stats {
+        /// Container ID
+        #[arg(short, long)]
+        id: String,
+    },
 
-    /// Path to container rootfs directory
-    #[arg(long)]
-    pub rootfs: Option<PathBuf>,
+    /// List all containers
+    List,
 
-    /// Command to execute in container
-    #[arg(last = true, default_value = "/bin/sh")]
-    pub command: Vec<String>,
+    /// Stop a container
+    Stop {
+        /// Container ID
+        #[arg(short, long)]
+        id: String,
+    },
+
+    /// Show namespace information
+    Namespaces {
+        /// Process ID (default: current process)
+        #[arg(short, long)]
+        pid: Option<u32>,
+    },
 }

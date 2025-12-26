@@ -8,3 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Internal
+vortex-core.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# System
+nix.workspace = true
+libc.workspace = true
+
+# Logging
+tracing.workspace = true

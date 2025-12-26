@@ -1,115 +1,269 @@
-//! Namespace manager implementation
+//! Namespace lifecycle management
 
 use nix::sched::{unshare, CloneFlags};
-use nix::unistd;
-use tracing::{debug, info};
+use nix::unistd::sethostname;
 use vortex_core::{Error, Result};
 
 use crate::config::NamespaceConfig;
-use crate::executor;
 
-/// Manages Linux namespaces for container isolation
+/// Namespace manager for creating and managing namespaces
+#[derive(Debug)]
 pub struct NamespaceManager {
     config: NamespaceConfig,
+    created: bool,
 }
 
 impl NamespaceManager {
     /// Create a new namespace manager
+    #[must_use]
     pub fn new(config: NamespaceConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            created: false,
+        }
     }
 
-    /// Enter namespaces (unshare from parent)
+    /// Create a new namespace manager with default config
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(NamespaceConfig::default())
+    }
+
+    /// Get the configuration
+    #[must_use]
+    pub fn config(&self) -> &NamespaceConfig {
+        &self.config
+    }
+
+    /// Check if namespaces have been created
+    #[must_use]
+    pub fn is_created(&self) -> bool {
+        self.created
+    }
+
+    /// Create the configured namespaces
     ///
-    /// This creates new namespaces for the current process.
-    /// After this call, the process is isolated according to config.
+    /// This calls unshare(2) to create new namespaces for the current process.
+    /// Note: PID namespace isolation requires forking - current process won't have PID 1.
     ///
-    /// # Safety
-    ///
-    /// This is safe Rust, but modifies process state in ways that affect
-    /// the entire process (not just this thread).
-    pub fn enter_namespaces(&self) -> Result<()> {
-        info!("🔒 Entering namespaces...");
-
-        let mut flags = CloneFlags::empty();
-
-        // Build flags based on config
-        if self.config.enable_pid {
-            debug!("  • PID namespace");
-            flags |= CloneFlags::CLONE_NEWPID;
+    /// # Errors
+    /// Returns error if namespace creation fails (typically due to permissions)
+    pub fn create(&mut self) -> Result<()> {
+        if self.created {
+            tracing::warn!("Namespaces already created");
+            return Ok(());
         }
 
-        if self.config.enable_mount {
-            debug!("  • Mount namespace");
-            flags |= CloneFlags::CLONE_NEWNS;
+        if !self.config.has_any() {
+            tracing::warn!("No namespaces enabled");
+            return Ok(());
         }
 
-        if self.config.enable_network {
-            debug!("  • Network namespace");
-            flags |= CloneFlags::CLONE_NEWNET;
+        // If PID namespace is requested, we need special handling
+        // because you can't unshare PID namespace for current process
+        // Only child processes will have new PID namespace
+        let mut flags = self.config.to_clone_flags();
+
+        // Remove PID namespace from unshare flags - it only affects children
+        let has_pid_ns = flags.contains(CloneFlags::CLONE_NEWPID);
+        if has_pid_ns {
+            flags.remove(CloneFlags::CLONE_NEWPID);
+            tracing::debug!("PID namespace will affect child processes only");
         }
 
-        if self.config.enable_uts {
-            debug!("  • UTS namespace (hostname)");
-            flags |= CloneFlags::CLONE_NEWUTS;
+        let enabled = self.config.enabled_namespaces();
+
+        tracing::info!(
+            namespaces = ?enabled,
+            "Creating namespaces"
+        );
+
+        // Create namespaces (except PID which requires fork)
+        if !flags.is_empty() {
+            unshare(flags).map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    namespaces = ?enabled,
+                    "Failed to create namespaces"
+                );
+                Error::Namespace {
+                    message: format!("Failed to unshare namespaces: {e}"),
+                }
+            })?;
         }
 
-        if self.config.enable_ipc {
-            debug!("  • IPC namespace");
-            flags |= CloneFlags::CLONE_NEWIPC;
+        tracing::debug!("Namespaces created successfully");
+
+        // Configure UTS namespace if enabled
+        if self.config.uts {
+            self.setup_uts()?;
         }
 
-        // Unshare - create new namespaces
-        unshare(flags).map_err(|e| Error::Namespace {
-            message: format!("Failed to unshare namespaces: {}", e),
-        })?;
+        self.created = true;
 
-        info!("✅ Namespaces entered");
+        if has_pid_ns {
+            tracing::info!(
+                namespaces = ?enabled,
+                "Namespace setup complete (PID namespace will be active in child processes)"
+            );
+        } else {
+            tracing::info!(
+                namespaces = ?enabled,
+                "Namespace setup complete"
+            );
+        }
 
-        // Set hostname if UTS namespace is enabled
-        if self.config.enable_uts {
-            if let Some(ref hostname) = self.config.hostname {
-                self.set_hostname(hostname)?;
+        Ok(())
+    }
+    fn setup_uts(&self) -> Result<()> {
+        // Set hostname if configured
+        if let Some(ref hostname) = self.config.hostname {
+            tracing::debug!(hostname = %hostname, "Setting hostname");
+
+            sethostname(hostname).map_err(|e| {
+                tracing::error!(
+                    hostname = %hostname,
+                    error = %e,
+                    "Failed to set hostname"
+                );
+                Error::Namespace {
+                    message: format!("Failed to set hostname: {e}"),
+                }
+            })?;
+        }
+
+        // Set domain name if configured
+        if let Some(ref domainname) = self.config.domainname {
+            tracing::debug!(domainname = %domainname, "Setting domain name");
+
+            // Use libc directly since nix doesn't expose setdomainname
+            unsafe {
+                let c_domainname =
+                    std::ffi::CString::new(domainname.as_str()).map_err(|e| Error::Namespace {
+                        message: format!("Invalid domain name: {e}"),
+                    })?;
+
+                if libc::setdomainname(c_domainname.as_ptr(), domainname.len()) != 0 {
+                    let err = std::io::Error::last_os_error();
+                    tracing::error!(
+                        domainname = %domainname,
+                        error = %err,
+                        "Failed to set domain name"
+                    );
+                    return Err(Error::Namespace {
+                        message: format!("Failed to set domain name: {err}"),
+                    });
+                }
             }
         }
 
         Ok(())
     }
-
-    /// Set container hostname
-    fn set_hostname(&self, hostname: &str) -> Result<()> {
-        debug!("Setting hostname to: {}", hostname);
-
-        unistd::sethostname(hostname).map_err(|e| Error::Namespace {
-            message: format!("Failed to set hostname: {}", e),
-        })?;
-
-        debug!("✅ Hostname set");
+    /// Enter existing namespaces (for joining a container)
+    ///
+    /// # Errors
+    /// Returns error if setns fails
+    pub fn enter(&self, _pid: i32) -> Result<()> {
+        // TODO: Implement namespace entering with setns(2)
+        tracing::warn!("Namespace entering not yet implemented");
         Ok(())
     }
 
-    /// Get current namespace configuration
-    pub fn config(&self) -> &NamespaceConfig {
-        &self.config
+    /// Get current namespace IDs
+    ///
+    /// # Errors
+    /// Returns error if reading namespace IDs fails
+    pub fn current_namespaces(&self) -> Result<NamespaceInfo> {
+        let pid = std::process::id();
+        Self::namespaces_for_pid(pid)
     }
 
-    /// Execute a command in isolated namespaces
+    /// Get namespace IDs for a specific PID
     ///
-    /// This method:
-    /// 1. Enters namespaces (including PID)
-    /// 2. Forks the process
-    /// 3. Child becomes PID 1 in new namespace
-    /// 4. Execs the command
-    /// 5. Parent waits for child
-    ///
-    /// Returns the exit code of the command.
-    pub fn execute_command(&self, command: &[String]) -> Result<i32> {
-        // First, enter all namespaces
-        self.enter_namespaces()?;
+    /// # Errors
+    /// Returns error if reading namespace IDs fails
+    pub fn namespaces_for_pid(pid: u32) -> Result<NamespaceInfo> {
+        use std::fs;
 
-        // Now fork and exec
-        // The child will be PID 1 in the new PID namespace
-        executor::execute_in_namespace(command)
+        let base_path = format!("/proc/{pid}/ns");
+
+        let read_ns = |name: &str| -> Result<String> {
+            let path = format!("{base_path}/{name}");
+            fs::read_link(&path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .map_err(|e| Error::Namespace {
+                    message: format!("Failed to read {name} namespace: {e}"),
+                })
+        };
+
+        Ok(NamespaceInfo {
+            pid: read_ns("pid").ok(),
+            net: read_ns("net").ok(),
+            mnt: read_ns("mnt").ok(),
+            uts: read_ns("uts").ok(),
+            ipc: read_ns("ipc").ok(),
+            user: read_ns("user").ok(),
+            cgroup: read_ns("cgroup").ok(),
+        })
+    }
+}
+
+/// Information about current namespaces
+#[derive(Debug, Clone, Default)]
+pub struct NamespaceInfo {
+    /// PID namespace ID
+    pub pid: Option<String>,
+    /// Network namespace ID
+    pub net: Option<String>,
+    /// Mount namespace ID
+    pub mnt: Option<String>,
+    /// UTS namespace ID
+    pub uts: Option<String>,
+    /// IPC namespace ID
+    pub ipc: Option<String>,
+    /// User namespace ID
+    pub user: Option<String>,
+    /// CGroup namespace ID
+    pub cgroup: Option<String>,
+}
+
+impl NamespaceInfo {
+    /// Check if in different namespace than init (PID 1)
+    ///
+    /// # Errors
+    /// Returns error if cannot read namespaces
+    pub fn is_isolated(&self) -> Result<bool> {
+        let init_ns = NamespaceManager::namespaces_for_pid(1)?;
+
+        Ok(self.pid != init_ns.pid || self.net != init_ns.net || self.mnt != init_ns.mnt)
+    }
+}
+
+impl std::fmt::Display for NamespaceInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Namespace Info:")?;
+        if let Some(ref pid) = self.pid {
+            writeln!(f, "  PID:    {pid}")?;
+        }
+        if let Some(ref net) = self.net {
+            writeln!(f, "  NET:    {net}")?;
+        }
+        if let Some(ref mnt) = self.mnt {
+            writeln!(f, "  MNT:    {mnt}")?;
+        }
+        if let Some(ref uts) = self.uts {
+            writeln!(f, "  UTS:    {uts}")?;
+        }
+        if let Some(ref ipc) = self.ipc {
+            writeln!(f, "  IPC:    {ipc}")?;
+        }
+        if let Some(ref user) = self.user {
+            writeln!(f, "  USER:   {user}")?;
+        }
+        if let Some(ref cgroup) = self.cgroup {
+            writeln!(f, "  CGROUP: {cgroup}")?;
+        }
+        Ok(())
     }
 }
 
@@ -118,19 +272,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_namespace_config() {
-        let config = NamespaceConfig::new();
-        assert!(config.enable_pid);
-        assert!(config.enable_mount);
-
+    fn test_manager_creation() {
+        let config = NamespaceConfig::default();
         let manager = NamespaceManager::new(config);
-        assert!(manager.config().enable_pid);
+
+        assert!(!manager.is_created());
+        assert!(manager.config().has_any());
     }
 
     #[test]
-    fn test_config_builder() {
-        let config = NamespaceConfig::minimal().with_hostname("test-container");
+    fn test_current_namespaces() {
+        let manager = NamespaceManager::with_defaults();
+        let ns_info = manager.current_namespaces();
 
-        assert_eq!(config.hostname, Some("test-container".to_string()));
+        assert!(ns_info.is_ok());
+        let info = ns_info.unwrap();
+        assert!(info.pid.is_some());
+    }
+
+    #[test]
+    fn test_namespace_info_display() {
+        let info = NamespaceInfo {
+            pid: Some("pid:[4026531836]".to_string()),
+            net: Some("net:[4026531905]".to_string()),
+            ..Default::default()
+        };
+
+        let display = format!("{info}");
+        assert!(display.contains("PID:"));
+        assert!(display.contains("NET:"));
     }
 }

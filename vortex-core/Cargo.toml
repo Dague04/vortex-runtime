@@ -5,12 +5,22 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
+# Error handling
 thiserror.workspace = true
+anyhow.workspace = true
+
+# Serialization
 serde.workspace = true
 serde_json.workspace = true
 
-[dev-dependencies]
-# For tests only
+# Async
+tokio.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+bytes.workspace = true
+nix.workspace = true
