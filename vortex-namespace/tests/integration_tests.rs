@@ -1,68 +1,118 @@
-//! Integration tests for namespace management
-//! Run with: cargo test -p vortex-namespace
-//! Run root tests: sudo cargo test -p vortex-namespace -- --ignored
-
-use vortex_namespace::{NamespaceConfig, NamespaceExecutor, NamespaceManager};
+use vortex_namespace::*;
 
 #[test]
-fn test_namespace_config_builder() {
-    let config = NamespaceConfig::new()
-        .with_pid(true)
-        .with_network(false)
-        .with_hostname("test-container");
-
-    assert!(config.pid);
-    assert!(!config.network);
-    assert_eq!(config.hostname.as_deref(), Some("test-container"));
+fn test_namespace_config_creation() {
+    let config = NamespaceConfig::new();
+    assert!(!config.has_any());
 }
 
 #[test]
-fn test_namespace_manager_default() {
-    let manager = NamespaceManager::with_defaults();
+fn test_namespace_config_minimal() {
+    let config = NamespaceConfig::minimal();
+    assert!(config.has_any());
+
+    let enabled = config.enabled_namespaces();
+    assert!(enabled.contains(&"pid"));
+    assert!(enabled.contains(&"mnt"));
+    assert!(enabled.contains(&"uts"));
+}
+
+#[test]
+fn test_namespace_config_with_hostname() {
+    let config = NamespaceConfig::minimal().with_hostname("my-container");
+
+    assert_eq!(config.hostname.as_deref(), Some("my-container"));
+}
+
+#[test]
+fn test_namespace_config_with_domainname() {
+    let config = NamespaceConfig::minimal().with_domainname("example.com");
+
+    assert_eq!(config.domainname.as_deref(), Some("example.com"));
+}
+
+#[test]
+fn test_execution_result() {
+    let result = ExecutionResult {
+        exit_code: 0,
+        stdout: b"hello".to_vec(),
+        stderr: Vec::new(),
+    };
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, b"hello");
+    assert!(result.stderr.is_empty());
+}
+
+#[test]
+fn test_execution_result_clone() {
+    let result1 = ExecutionResult {
+        exit_code: 42,
+        stdout: b"output".to_vec(),
+        stderr: b"error".to_vec(),
+    };
+
+    let result2 = result1.clone();
+
+    assert_eq!(result1.exit_code, result2.exit_code);
+    assert_eq!(result1.stdout, result2.stdout);
+    assert_eq!(result1.stderr, result2.stderr);
+}
+
+#[test]
+fn test_namespace_executor_creation() {
+    let config = NamespaceConfig::new();
+    let executor = NamespaceExecutor::new(config);
+
+    assert!(executor.is_ok());
+}
+
+#[test]
+#[ignore] // Requires root
+fn test_namespace_manager_creation() {
+    let config = NamespaceConfig::new();
+    let manager = NamespaceManager::new(config);
+
     assert!(!manager.is_created());
-    assert!(manager.config().has_any());
 }
 
 #[test]
-fn test_current_namespaces() {
-    let manager = NamespaceManager::with_defaults();
-    let ns_info = manager
-        .current_namespaces()
-        .expect("Failed to get namespace info");
-    assert!(ns_info.pid.is_some());
+#[ignore] // Requires root
+fn test_simple_command_execution() {
+    let config = NamespaceConfig::new();
+    let executor = NamespaceExecutor::new(config).unwrap();
+
+    let result = executor.execute("/bin/echo", &["hello".to_string()]);
+
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("hello"));
 }
 
 #[test]
-#[ignore]
-fn test_namespace_creation_requires_root() {
-    if !nix::unistd::getuid().is_root() {
-        println!("Skipping - requires root");
-        return;
-    }
+#[ignore] // Requires root
+fn test_command_with_stderr() {
+    let config = NamespaceConfig::new();
+    let executor = NamespaceExecutor::new(config).unwrap();
 
-    let config = NamespaceConfig::minimal();
-    let mut manager = NamespaceManager::new(config);
+    let result = executor.execute("/bin/sh", &["-c".to_string(), "echo error >&2".to_string()]);
 
-    let result = manager.create();
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
-    assert!(manager.is_created());
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("error"));
 }
 
 #[test]
-#[ignore]
-fn test_executor_command() {
-    if !nix::unistd::getuid().is_root() {
-        println!("Skipping - requires root");
-        return;
-    }
+#[ignore] // Requires root
+fn test_nonexistent_command() {
+    let config = NamespaceConfig::new();
+    let executor = NamespaceExecutor::new(config).unwrap();
 
-    let config = NamespaceConfig::minimal();
-    let mut executor = NamespaceExecutor::new(config);
+    let result = executor.execute("/bin/nonexistent", &[]);
 
-    let result = executor
-        .execute("/bin/echo", &["Hello".to_string()])
-        .expect("Failed to execute");
-
-    assert!(result.success());
-    assert!(result.stdout_string().contains("Hello"));
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_ne!(result.exit_code, 0);
 }

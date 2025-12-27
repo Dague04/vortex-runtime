@@ -1,21 +1,16 @@
-//! CLI argument definitions
-
 use clap::{Parser, Subcommand};
 
-#[derive(Parser)]
+/// Vortex container runtime
+#[derive(Parser, Debug)]
 #[command(name = "vortex")]
-#[command(about = "Vortex container runtime", long_about = None)]
+#[command(about = "Lightweight container runtime", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// Enable verbose logging
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
-
     #[command(subcommand)]
     pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run a container
     Run {
@@ -23,23 +18,23 @@ pub enum Commands {
         #[arg(short, long)]
         id: String,
 
-        /// CPU limit in cores (e.g., 1.0, 0.5)
+        /// CPU limit in cores (default: 1.0)
         #[arg(long, default_value = "1.0")]
         cpu: f64,
 
-        /// Memory limit in MB
+        /// Memory limit in MB (default: 512)
         #[arg(long, default_value = "512")]
         memory: u64,
 
-        /// Enable monitoring
+        /// Enable resource monitoring
         #[arg(long)]
         monitor: bool,
 
-        /// Disable namespaces
+        /// Disable namespaces (no isolation)
         #[arg(long)]
         no_namespaces: bool,
 
-        /// Custom hostname
+        /// Container hostname
         #[arg(long)]
         hostname: Option<String>,
 
@@ -67,8 +62,11 @@ pub enum Commands {
 
     /// Show namespace information
     Namespaces {
-        /// Process ID (default: current process)
-        #[arg(short, long)]
-        pid: Option<u32>,
+        /// Process ID to inspect (default: current process)
+        #[arg(long)]
+        pid: Option<i32>,
     },
+
+    /// Check system health and requirements
+    Health,
 }

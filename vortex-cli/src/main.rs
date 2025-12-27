@@ -1,28 +1,24 @@
-//! Vortex container runtime CLI
+use anyhow::Result;
+use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod commands;
 
-use anyhow::Result;
-use clap::Parser;
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse command line arguments
+    use clap::Parser;
     let cli = cli::Cli::parse();
 
-    // Initialize tracing
-    let log_level = if cli.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
+    // Setup logging
+    let log_level = "info";
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(log_level.into()),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)),
         )
         .init();
 
-    // Dispatch to command handlers
+    // Dispatch command
     commands::dispatch(cli.command).await
 }

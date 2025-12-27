@@ -11,40 +11,78 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
-authors = ["Your Name <you@example.com>"]
+authors = ["Your Name <your.email@example.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/vortex-runtime"
+repository = "https://github.com/yourusername/vortex"
+
+rust-version = "1.92"
 
 [workspace.dependencies]
-# Error handling
-anyhow = "1.0"
-thiserror = "1.0"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Async runtime
-tokio = { version = "1.40", features = ["full"] }
-async-trait = "0.1"
-
-# Logging (tracing, not log!)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-
-# CLI
-clap = { version = "4.5", features = ["derive", "cargo"] }
-
-# System interface
-nix = { version = "0.30.1", features = ["fs", "hostname", "mount", "process", "sched", "signal", "user"] }
-libc = "0.2"
-
-# Utilities
-bytes = "1.7"
-
 # Internal workspace dependencies
 vortex-core = { path = "vortex-core" }
 vortex-cgroup = { path = "vortex-cgroup" }
 vortex-namespace = { path = "vortex-namespace" }
 vortex-security = { path = "vortex-security" }
+
+# Async runtime
+tokio = { version = "1.48.0", features = ["full"] }
+
+# Error handling
+anyhow = "1.0.100"
+thiserror = "2.0.17"
+
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.147"
+
+# System programming
+nix = { version = "0.30.1", features = ["hostname", "process", "sched", "fs"] }
+libc = "0.2.178"
+
+# Async traits
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+bytes = "1.11.0"
+# Testing
+assert_cmd = "2.0"
+predicates = "3.0"
+
+[profile.release]
+# Strip debug symbols from binary
+strip = true
+
+# Enable Link Time Optimization
+lto = true
+
+# Optimize for size (can also use 3 for speed)
+opt-level = 3
+
+# Use only 1 codegen unit for better optimization
+codegen-units = 1
+
+# Enable abort on panic (smaller binary, no unwinding)
+panic = "abort"
+
+[profile.dev]
+# Some optimization for faster dev builds
+opt-level = 1
+
+# Fast incremental compilation
+incremental = true
+
+[profile.test]
+# Faster test compilation
+opt-level = 1
+
+[profile.bench]
+# Maximum optimization for benchmarks
+opt-level = 3
+lto = true
+codegen-units = 1
+

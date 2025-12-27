@@ -18,29 +18,13 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// Vortex cgroup namespace
 const VORTEX_NAMESPACE: &str = "vortex";
 
+/// Delay for kernel cleanup operations (milliseconds)
+const KERNEL_CLEANUP_DELAY_MS: u64 = 10;
+
+/// Required CGroup controllers
+const REQUIRED_CONTROLLERS: &[&str] = &["cpu", "memory", "io"];
+
 /// CGroup v2 controller for resource management
-///
-/// # Example
-/// ```no_run
-/// use vortex_cgroup::CGroupController;
-/// use vortex_core::{ContainerId, CpuLimit, CpuCores, MemoryLimit, MemorySize};
-///
-/// # tokio_test::block_on(async {
-/// let id = ContainerId::new("my-container").unwrap();
-/// let mut controller = CGroupController::new(id).await.unwrap();
-///
-/// // Set resource limits
-/// controller.set_cpu_limit(CpuLimit::new(CpuCores::new(1.0))).await.unwrap();
-/// controller.set_memory_limit(MemoryLimit::new(MemorySize::from_mb(512))).await.unwrap();
-///
-/// // Read stats
-/// let stats = controller.stats().await.unwrap();
-/// println!("CPU: {:.2}s", stats.cpu_usage.as_secs_f64());
-///
-/// // Cleanup
-/// controller.cleanup().await.unwrap();
-/// # });
-/// ```
 pub struct CGroupController {
     container_id: ContainerId,
     path: PathBuf,
@@ -66,9 +50,6 @@ impl CGroupController {
             "Creating CGroup controller"
         );
 
-        // Ensure delegation is set up
-        Self::ensure_delegation().await?;
-
         let path = Path::new(CGROUP_ROOT)
             .join(VORTEX_NAMESPACE)
             .join(container_id.as_str());
@@ -89,6 +70,7 @@ impl CGroupController {
 
         Ok(controller)
     }
+
     /// Create a shared (Arc<Mutex<>>) controller for concurrent access
     ///
     /// # Errors
@@ -116,14 +98,23 @@ impl CGroupController {
         self.active
     }
 
+    /// Create the cgroup directory hierarchy and enable controllers
     async fn create(&mut self) -> Result<()> {
+        // Step 1: Create directory structure
+        self.create_directory_hierarchy().await?;
+
+        // Step 2: Enable controllers at each level
+        self.enable_controllers_in_hierarchy().await?;
+
+        Ok(())
+    }
+
+    /// Create the directory hierarchy for this cgroup
+    async fn create_directory_hierarchy(&self) -> Result<()> {
         let root = Path::new(CGROUP_ROOT);
         let vortex_root = root.join(VORTEX_NAMESPACE);
 
-        // Enable controllers at root level first
-        let _ = self.try_enable_at_path(root).await;
-
-        // Create vortex directory
+        // Create vortex directory if it doesn't exist
         if !vortex_root.exists() {
             fs::create_dir_all(&vortex_root).await.map_err(|e| {
                 tracing::error!(
@@ -131,12 +122,20 @@ impl CGroupController {
                     error = %e,
                     "Failed to create vortex directory"
                 );
-                Error::Io(e)
+                Error::CGroup {
+                    message: format!(
+                        "Failed to create vortex directory: {}\nPath: {}",
+                        e,
+                        vortex_root.display()
+                    ),
+                }
             })?;
-        }
 
-        // Enable controllers at vortex level
-        let _ = self.try_enable_at_path(&vortex_root).await;
+            tracing::info!(
+                path = %vortex_root.display(),
+                "Created vortex cgroup directory"
+            );
+        }
 
         // Create container directory
         fs::create_dir_all(&self.path).await.map_err(|e| {
@@ -145,7 +144,13 @@ impl CGroupController {
                 error = %e,
                 "Failed to create container directory"
             );
-            Error::Io(e)
+            Error::CGroup {
+                message: format!(
+                    "Failed to create container directory: {}\nPath: {}",
+                    e,
+                    self.path.display()
+                ),
+            }
         })?;
 
         tracing::debug!(
@@ -156,35 +161,73 @@ impl CGroupController {
         Ok(())
     }
 
-    async fn try_enable_at_path(&self, path: &Path) -> Result<()> {
+    /// Enable controllers at all levels in the hierarchy
+    async fn enable_controllers_in_hierarchy(&self) -> Result<()> {
+        let root = Path::new(CGROUP_ROOT);
+        let vortex_root = root.join(VORTEX_NAMESPACE);
+
+        // Enable at root level (best effort)
+        self.enable_controllers_at(root).await;
+
+        // Enable at vortex level (best effort)
+        self.enable_controllers_at(&vortex_root).await;
+
+        Ok(())
+    }
+
+    /// Enable controllers at a specific path
+    ///
+    /// This is best-effort and will not fail if controllers cannot be enabled
+    /// (they might be managed by systemd or already enabled at a higher level)
+    async fn enable_controllers_at(&self, path: &Path) {
         let controllers_file = path.join("cgroup.controllers");
         let control_file = path.join("cgroup.subtree_control");
 
         // Skip if control file doesn't exist
         if !control_file.exists() {
-            return Ok(());
+            tracing::trace!(
+                path = %path.display(),
+                "Subtree control file doesn't exist, skipping"
+            );
+            return;
         }
 
         // Read available controllers
-        let available = fs::read_to_string(&controllers_file)
-            .await
-            .unwrap_or_default();
+        let available = match fs::read_to_string(&controllers_file).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::trace!(
+                    path = %path.display(),
+                    error = %e,
+                    "Could not read available controllers"
+                );
+                return;
+            }
+        };
 
-        // Read already enabled controllers
+        // Read currently enabled controllers
         let enabled = fs::read_to_string(&control_file).await.unwrap_or_default();
 
-        // Try to enable each needed controller
-        for controller in ["cpu", "memory", "io"] {
-            if !available.contains(controller) {
-                continue;
-            }
+        // Determine which controllers need to be enabled
+        let to_enable: Vec<&str> = REQUIRED_CONTROLLERS
+            .iter()
+            .copied()
+            .filter(|c| available.contains(c) && !enabled.contains(c))
+            .collect();
 
-            if enabled.contains(controller) {
-                continue;
-            }
+        if to_enable.is_empty() {
+            tracing::trace!(
+                path = %path.display(),
+                "All required controllers already enabled"
+            );
+            return;
+        }
 
-            // Try to enable
-            let cmd = format!("+{controller}");
+        // Try to enable each controller individually
+        // This is more robust than enabling all at once
+        for controller in &to_enable {
+            let cmd = format!("+{}", controller);
+
             match fs::write(&control_file, &cmd).await {
                 Ok(()) => {
                     tracing::debug!(
@@ -194,62 +237,17 @@ impl CGroupController {
                     );
                 }
                 Err(e) => {
-                    // Just log, don't fail
+                    // Just log at debug level - this is expected in many cases
+                    // (systemd management, already enabled at higher level, etc.)
                     tracing::debug!(
                         path = %path.display(),
                         controller = %controller,
                         error = %e,
-                        "Could not enable controller"
+                        "Could not enable controller (may be managed at higher level)"
                     );
                 }
             }
         }
-
-        Ok(())
-    }
-
-    async fn ensure_delegation() -> Result<()> {
-        let root = Path::new(CGROUP_ROOT);
-
-        // Check if systemd is managing cgroups
-        let systemd_cgroup = root.join("init.scope");
-        let using_systemd = systemd_cgroup.exists();
-
-        if using_systemd {
-            tracing::debug!("SystemD is managing cgroups");
-        }
-
-        // Try to enable controllers at root
-        let root_control = root.join("cgroup.subtree_control");
-        if root_control.exists() {
-            // Read available controllers
-            let available = fs::read_to_string(root.join("cgroup.controllers"))
-                .await
-                .unwrap_or_default();
-
-            tracing::debug!(available_controllers = %available, "Available at root");
-
-            // Try to enable each one individually
-            for controller in ["cpu", "memory", "io"] {
-                if available.contains(controller) {
-                    let cmd = format!("+{controller}");
-                    match fs::write(&root_control, &cmd).await {
-                        Ok(()) => {
-                            tracing::debug!(controller = %controller, "Enabled at root");
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                controller = %controller,
-                                error = %e,
-                                "Could not enable at root (may be managed by systemd)"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Cleanup the cgroup
@@ -273,39 +271,65 @@ impl CGroupController {
         );
 
         // Move processes to root cgroup
-        let procs_file = self.path.join("cgroup.procs");
-        if let Ok(pids_str) = fs::read_to_string(&procs_file).await {
-            let root_procs = Path::new(CGROUP_ROOT).join("cgroup.procs");
-
-            for line in pids_str.lines() {
-                if let Ok(pid) = line.trim().parse::<i32>() {
-                    let _ = fs::write(&root_procs, pid.to_string()).await;
-                }
-            }
-        }
+        self.move_processes_to_root().await;
 
         // Small delay for kernel cleanup
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(KERNEL_CLEANUP_DELAY_MS)).await;
 
         // Remove directory
+        self.remove_cgroup_directory().await;
+
+        self.active = false;
+        Ok(())
+    }
+
+    /// Move all processes in this cgroup back to the root cgroup
+    async fn move_processes_to_root(&self) {
+        let procs_file = self.path.join("cgroup.procs");
+        let root_procs = Path::new(CGROUP_ROOT).join("cgroup.procs");
+
+        match fs::read_to_string(&procs_file).await {
+            Ok(pids_str) => {
+                for line in pids_str.lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        if let Err(e) = fs::write(&root_procs, pid.to_string()).await {
+                            tracing::debug!(
+                                pid = pid,
+                                error = %e,
+                                "Could not move process to root cgroup"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "Could not read process list"
+                );
+            }
+        }
+    }
+
+    /// Remove the cgroup directory
+    async fn remove_cgroup_directory(&self) {
         match fs::remove_dir(&self.path).await {
             Ok(()) => {
                 tracing::info!(
                     container_id = %self.container_id,
+                    path = %self.path.display(),
                     "CGroup removed"
                 );
             }
             Err(e) => {
                 tracing::warn!(
                     container_id = %self.container_id,
+                    path = %self.path.display(),
                     error = %e,
-                    "Failed to remove cgroup directory"
+                    "Failed to remove cgroup directory (may already be removed)"
                 );
             }
         }
-
-        self.active = false;
-        Ok(())
     }
 }
 
@@ -565,7 +589,7 @@ impl Drop for CGroupController {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(KERNEL_CLEANUP_DELAY_MS));
         let _ = std::fs::remove_dir(&self.path);
 
         self.active = false;

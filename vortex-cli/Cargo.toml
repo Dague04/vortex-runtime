@@ -2,9 +2,11 @@
 name = "vortex-cli"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for Vortex container runtime"
 
 [[bin]]
 name = "vortex"
@@ -16,23 +18,15 @@ vortex-core.workspace = true
 vortex-cgroup.workspace = true
 vortex-namespace.workspace = true
 
-# Error handling
-anyhow.workspace = true
-thiserror.workspace = true
-
-# Async
+# Workspace dependencies
 tokio.workspace = true
-
-# CLI
-clap.workspace = true
-
-# Logging
+anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-# System
 nix.workspace = true
+clap.workspace = true
+libc.workspace = true
 
-# Serialization
-serde.workspace = true
-serde_json.workspace = true
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true

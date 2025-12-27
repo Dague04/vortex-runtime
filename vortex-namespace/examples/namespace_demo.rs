@@ -5,6 +5,11 @@
 
 use vortex_namespace::{NamespaceConfig, NamespaceExecutor, NamespaceManager};
 
+/// Check if running as root
+fn is_root() -> bool {
+    unsafe { libc::getuid() == 0 }
+}
+
 fn main() {
     println!("🔒 Vortex Namespace Demo\n");
 
@@ -14,7 +19,7 @@ fn main() {
     demo_current_namespaces();
     demo_config_options();
 
-    if nix::unistd::getuid().is_root() {
+    if is_root() {
         println!("\n🔐 Running with root privileges - demonstrating isolation\n");
         demo_namespace_creation();
         demo_command_execution();
@@ -100,14 +105,21 @@ fn demo_command_execution() {
         .with_uts(true)
         .with_hostname("demo-container");
 
-    let mut executor = NamespaceExecutor::new(config);
+    let executor = match NamespaceExecutor::new(config) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("❌ Failed to create executor: {}", e);
+            return;
+        }
+    };
 
     // Test 1: Echo command
     println!("  Test 1: Echo command");
     match executor.execute("/bin/echo", &["Hello from isolated namespace!".to_string()]) {
         Ok(result) => {
             println!("    Exit code: {}", result.exit_code);
-            println!("    Output: {}", result.stdout_string().trim());
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            println!("    Output: {}", stdout.trim());
         }
         Err(e) => println!("    ❌ Failed: {}", e),
     }
@@ -116,7 +128,8 @@ fn demo_command_execution() {
     println!("\n  Test 2: Show hostname");
     match executor.execute("/bin/hostname", &[]) {
         Ok(result) => {
-            println!("    Hostname: {}", result.stdout_string().trim());
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            println!("    Hostname: {}", stdout.trim());
         }
         Err(e) => println!("    ❌ Failed: {}", e),
     }
@@ -125,7 +138,8 @@ fn demo_command_execution() {
     println!("\n  Test 3: Process info");
     match executor.execute("/bin/sh", &["-c".to_string(), "echo PID: $$".to_string()]) {
         Ok(result) => {
-            println!("    {}", result.stdout_string().trim());
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            println!("    {}", stdout.trim());
         }
         Err(e) => println!("    ❌ Failed: {}", e),
     }

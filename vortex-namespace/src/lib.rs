@@ -16,5 +16,5 @@ pub mod executor;
 pub mod manager;
 
 pub use config::{NamespaceConfig, NamespaceFlags};
-pub use executor::NamespaceExecutor;
+pub use executor::{ExecutionResult, NamespaceExecutor};
 pub use manager::NamespaceManager;
